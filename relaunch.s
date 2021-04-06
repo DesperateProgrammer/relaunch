@@ -16,6 +16,7 @@
 .equ TMD_STACKRETURN    ,0x02FE3558
 .equ HWREG_BASE         ,0x04000000
 .equ PALETTE_BASE       ,0x05000000
+.equ FILESYSTEM_PTRS    ,0x037F2B74
 
 # The exploited code is arm32 
 # We could make it return to thumb code but for simplicity all code within here
@@ -70,21 +71,162 @@ setScreenColored:
   bx lr
    
 delay:
-  mov r0, #0x00A00000 @ time to wait
+  mov r0, #0x00500000 @ time to wait
 delayloop:
   subs r0, r0, #1 @ subtract 1
   bne delayloop @ jump back if not zero
   bx lr @ return
-
+  
 entry:
+  BL captureARM7
+mainLoop:
   mov r0, #0xFC00
   BL setScreenColored
   BL delay
   mov r0, #0x03C0
   BL setScreenColored
   BL delay  
-  B entry
+  B mainLoop
+  
+##############################
+# ARM7 Payload               #
+##############################
 
+@ We do a simple counter loop
+@ as an example and check a
+@ branch target field if it
+@ is not 0, then just branch
+
+arm7PayloadStart:
+  mov r0, 0
+arm7CountLoop:
+  add r0, r0, #1
+  ldr r1, arm7BranchTarget
+  cmp r1, #0
+  bxne r1
+  B arm7CountLoop
+arm7BranchTarget:
+  .word 0
+arm7PayloadEnd:
+  B .
+
+##############################
+#    Gain control of ARM7    #
+##############################
+
+@ The Idea to gain control of the arm7 execution is to grab a page of the WRAM 
+@ from the arm7 that is not executed, save its data for later and fill it with a
+@ NOP slide to branch to payload
+@ then we blend it back to the arm7 at a page that will be executed in normal
+@ operation (the page the ISRs are in)
+@ The arm7 then will fetch the nop slide and branch to the payload
+ 
+captureARM7:
+  push {lr}
+copyPayload:
+  @ Copy arm7 payload to main ram
+  adr r0, arm7PayloadStart
+  adr r1, arm7PayloadEnd
+  mov r2, #0x02000000
+copyPayloadLoop:
+  ldr r3, [r0], #4
+  str r3, [r2], #4
+  cmp r0, r1
+  bne copyPayloadLoop
+setWRAMBaseC:
+  @ Set base and end address for bank C (none set yet)
+  ldr r0, addrMBK8
+  ldr r1, dataMBK8
+  str r1,[r0]
+getWRAMPage:
+  @ Gain Control of 1st Page for ARM9 at offset 0
+  ldr r0, addrMBK4
+  ldr r1, dataMBK4_ARM9Ctrl
+  str r1,[r0]
+  ldr r1, dataMBK5_ARM9Ctrl
+  str r1,[r0, #4]
+backupData:
+  @ Save the code that was on this page in main ram for later recovery
+  mov r0, 0x8000
+  mov r1, 0x03800000
+  mov r2, 0x02100000
+backupLoop:
+  ldr r3, [r1],#4
+  str r3, [r2],#4
+  subs r0, r0, #4
+  bne backupLoop
+clearPage: 
+  @ Clear with B self (for now to see where we are)
+  mov r0, 0x8000
+  sub r0, r0, #4
+  mov r1, 0x03800000
+  ldr r2, nopSlide
+clrLoop:
+  str r2, [r1],#4
+  subs r0, r0, #4
+  bne clrLoop
+  ldr r2, nopSlideEnd
+  str r2, [r1],#4
+postPage:
+  @ Set control to arm7 again, so 
+  ldr r0, addrMBK4
+  ldr r1, dataMBK4_ARM7Ctrl
+  ldr r2, dataMBK5_ARM7Ctrl
+  str r1,[r0] 
+  str r2,[r0, #4] 
+waitTillWeAreSureArm7IsCaptured:
+  BL delay
+restoreBackup:
+  ldr r0, addrMBK4
+  ldr r1, dataMBK4_ARM9Ctrl
+  str r1,[r0]
+  ldr r1, dataMBK5_ARM9Ctrl
+  str r1,[r0, #4]
+  mov r0, 0x8000
+  mov r1, 0x03800000
+  mov r2, 0x02100000
+restoreLoop:
+  ldr r3, [r2],#4
+  str r3, [r1],#4
+  subs r0, r0, #4
+  bne restoreLoop  
+restoreOrigPages:
+  ldr r0, addrMBK4
+  ldr r1, dataMBK4_Restore
+  str r1,[r0]
+  ldr r1, dataMBK5_Restore
+  str r1,[r0, #4]
+testEnd:
+  pop {lr}
+  BX lr
+
+addrMBK4:
+  .word 0x400404C
+addrMBK8:
+  .word 0x400405C
+dataMBK4_ARM9Ctrl:
+  .word 0x8D898580
+dataMBK5_ARM9Ctrl:
+  .word 0x9D999591
+dataMBK4_ARM7Ctrl:
+  .word 0x8D89859D
+dataMBK5_ARM7Ctrl:
+  .word 0x80999591
+dataMBK4_Restore:
+  .word 0x8D898581
+dataMBK5_Restore:
+  .word 0x9D999591
+dataMBK8:
+  .word 0x08803800
+codeBranchSelf:
+  .word 0xEAFFFFFE
+  
+nopSlide:
+  mov r0, #0x02000000
+nopSlideEnd:
+  BX r0
+  
+  
 ##############################
 #           EXPLOIT          #
 ############################## 
