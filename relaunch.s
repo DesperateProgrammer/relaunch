@@ -16,7 +16,6 @@
 .equ TMD_STACKRETURN    ,0x02FE3558
 .equ HWREG_BASE         ,0x04000000
 .equ PALETTE_BASE       ,0x05000000
-.equ FILESYSTEM_PTRS    ,0x037F2B74
 
 # The exploited code is arm32 
 # We could make it return to thumb code but for simplicity all code within here
@@ -43,7 +42,7 @@ _start:
 # Fill until payload with AA #
 ############################## 
 
-.org (0x037f0000 - SECTIONBASE), 0xAA
+# .org (0x037f0000 - SECTIONBASE), 0xAA
 
 ##############################
 #     ! Actual Payload !     #
@@ -86,29 +85,42 @@ mainLoop:
   mov r0, #0x03C0
   BL setScreenColored
   BL delay  
-  B mainLoop
+#  B mainLoop
+  ldr r0, passmeAddress
+  ldr r1, passmeInstruction
+  str r1, [r0]
+  str r0, [r0, #0x20]
+  mov r2, #0x02000000
+  ldr r1, [r2, #4]
+  str r1, [r2]
+  BX r0
+  
+  
+passmeAddress:
+  .word 0x02FFFE04
+passmeInstruction:
+  .word 0xE59FF018
   
 ##############################
-# ARM7 Payload               #
+# Patches for the stag2 to   #
+# run other DSi Paths        #
 ##############################
 
-@ We do a simple counter loop
-@ as an example and check a
-@ branch target field if it
-@ is not 0, then just branch
+srlFilenameBuffer:
+  .word 0x02ffdfc0
+  
+@ the following address points to the branch that resolves the filename to
+@ load by teh stage 2 bootloader. By replacing this with a NOP we could
+@ pass a srl file name to load from the payload
 
-arm7PayloadStart:
-  mov r0, 0
-arm7CountLoop:
-  add r0, r0, #1
-  ldr r1, arm7BranchTarget
-  cmp r1, #0
-  bxne r1
-  B arm7CountLoop
-arm7BranchTarget:
-  .word 0
-arm7PayloadEnd:
-  B .
+filenamePatchLocation:
+  .word 0x037b8b74
+filenamePatchInstruction:
+  B . + 4
+checkHeaderPatchLocation:
+  .word 0x037b8bb8
+checkHeaderPatchInstruction:
+  B . + 4 
 
 ##############################
 #    Gain control of ARM7    #
@@ -124,7 +136,7 @@ arm7PayloadEnd:
 captureARM7:
   push {lr}
 copyPayload:
-  @ Copy arm7 payload to main ram
+  @ Copy arm7 and arm9 main ram payload to main ram
   adr r0, arm7PayloadStart
   adr r1, arm7PayloadEnd
   mov r2, #0x02000000
@@ -133,6 +145,24 @@ copyPayloadLoop:
   str r3, [r2], #4
   cmp r0, r1
   bne copyPayloadLoop
+copyBootloader:
+  @ set VRAM C LCD
+  ldr r0, regVRAMC
+  ldr r1, VRAMC_LCD
+  strb r1, [r0]
+  @ copy to vram
+  adr r0, VRAMPayloadStart
+  add r1, r0, #32768
+  ldr r2, VRAMC_ADDR
+copyBootloaderLoop:
+  ldrh r3, [r0], #2
+  strh r3, [r2], #2
+  cmp r0, r1
+  bne copyBootloaderLoop
+  @ set VRAM C arm7
+  ldr r0, regVRAMC
+  ldr r1, VRAMC_ARM7
+  strb r1, [r0]
 setWRAMBaseC:
   @ Set base and end address for bank C (none set yet)
   ldr r0, addrMBK8
@@ -220,12 +250,36 @@ dataMBK8:
   .word 0x08803800
 codeBranchSelf:
   .word 0xEAFFFFFE
+regVRAMC:
+  .word 0x04000242
+VRAMC_LCD:
+  .word 0x00000080
+VRAMC_ARM7:
+  .word 0x00000082
+VRAMC_ADDR:
+  .word 0x06840000
   
 nopSlide:
   mov r0, #0x02000000
 nopSlideEnd:
   BX r0
   
+##############################
+# ARM7 Payload               #
+##############################
+
+@ Create the passme loop and jump to it
+
+arm7PayloadStart:
+  b .
+  mov pc, #0x06000000
+arm7PayloadEnd:
+
+
+VRAMPayloadStart:
+  .incbin "nds_bootloader.bin"  
+VRAMPayloadEnd:
+  B .   
   
 ##############################
 #           EXPLOIT          #
@@ -238,7 +292,7 @@ nopSlideEnd:
 # Pseudo code:
 #   [[037F3878h]+78h] = 037F3CC0h
 #
-# We will overwrite the retur value of that very same function on the stack
+# We will overwrite the return value of that very same function on the stack
 # with the constant. Conveniantly the constant is a valid address we have 
 # overwritten with the .TMD. 
 #
